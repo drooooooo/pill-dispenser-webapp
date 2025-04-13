@@ -17,7 +17,10 @@ Servo servoA, servoB;
 // === State Flags ===
 bool waitingForUser = true;
 bool awaitingResponse = false;
-bool hasDispensed = false;
+bool hasDispensed = false;  // Should start as false
+
+// Store the username from dispense command
+String currentUser = "";
 
 String inputBuffer = "";
 
@@ -92,7 +95,9 @@ void checkUltrasonic2() {
   long dist = getDistance(TRIG2, ECHO2);
   if (dist > 0 && dist < 10) {
     setLEDColor(255, 0, 255); // PURPLE (Red + Blue)
-    Serial.println("pills_taken:userA");
+    
+    // Use the stored username instead of hardcoded "userA"
+    Serial.println("pills_taken:" + currentUser);
 
     playPickupTone(); // Cool sci-fi sound!
     
@@ -115,12 +120,13 @@ void processCommand(String cmd) {
     int idx2 = cmd.indexOf(':', idx1 + 1);
     int idx3 = cmd.indexOf(':', idx2 + 1);
 
-    String user = cmd.substring(idx1 + 1, idx2);
+    // Store the username for later use
+    currentUser = cmd.substring(idx1 + 1, idx2);
     int pillsA = cmd.substring(idx2 + 1, idx3).toInt();
     int pillsB = cmd.substring(idx3 + 1).toInt();
 
     dispense(pillsA, pillsB);
-    hasDispensed = true;
+    hasDispensed = true;  // Set to true after dispensing
 
   } else if (cmd == "no_user_detected") {
     setLEDColor(255, 0, 0); // RED
