@@ -163,16 +163,11 @@ void dispense(int pillsA, int pillsB) {
 
 // === Rotate Servo CW, Pause, and CCW per pill ===
 void rotateServoOnce(Servo& s) {
-  s.write(180);  // Clockwise (dispense)
-  delay(400);
+  
+  s.write(180);    // up (reset)
+  delay(755);
+  s.write(90);
 
-  s.write(90);   // Pause
-  delay(1000);   // Let pill drop
-
-  s.write(0);    // Counterclockwise (reset)
-  delay(400);
-
-  s.write(90);   // Stop
 }
 
 // === LED Control ===
