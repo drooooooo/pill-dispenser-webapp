@@ -2,17 +2,17 @@ from flask import Flask, request, redirect, url_for, flash, get_flashed_messages
 import serial
 import threading
 import time
+from datetime import datetime
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime, timedelta
 
 app = Flask(__name__)
 app.secret_key = 'your_secret_key_here'  # Replace with a strong secret key
 
 # === Configure Your Serial Ports ===
 try:
-    arduino_port = '/dev/tty.usbmodem142401'  # Update with your Arduino port
+    arduino_port = '/dev/tty.usbmodem1423201'  # Update with your Arduino port
     esp32_port = '/dev/tty.usbserial-14210'    # Update with your ESP32 port
     arduino = serial.Serial(arduino_port, 9600, timeout=1)
     esp32 = serial.Serial(esp32_port, 115200, timeout=1)
@@ -23,47 +23,82 @@ except Exception as e:
 
 # Global list to store registered users (each a dict with registration details)
 registered_users = []
-# Global dictionary to store dosage notification status for each user.
+# Global dictionary to store dosage status for each user.
 # Key: username; Value: a list of three booleans for the three scheduled times.
 taken_status = {}
 # Last dispensed time and user - to track which button was most recently pressed
 last_dispensed = {"user": None, "time_index": None, "timestamp": None}
-# Email configuration
-email_config = {
-    "enabled": True,
-    "smtp_server": "smtp.gmail.com",
-    "smtp_port": 587,
-    "sender_email": "da.roof928@gmail.com",  # Replace with your email
-    "sender_password": "your_app_password",  # Replace with your app password
-    "caregiver_email": "da.roof928@gmail@example.com"  # Replace with caregiver's email
-}
+
+# === Email Configuration ===
+EMAIL_ENABLED = True  # Set to False to disable email notifications during testing
+EMAIL_SENDER = "medication.dispenser@gmail.com"  # Update with your sender email
+EMAIL_PASSWORD = "eqym bmbm cqzb nqfx"  # Update with your email password
+EMAIL_RECIPIENT = "da.roof928@gmail.com"  # Update with caregiver's email
+SMTP_SERVER = "smtp.example.com"  # Update with your SMTP server
+SMTP_PORT = 587  # Update with your SMTP port (typically 587 for TLS)
 
 
-def send_email(recipient, subject, message):
-    """Send an email to the specified recipient."""
-    if not email_config["enabled"]:
-        print(f"Email would be sent to {recipient} with subject: {subject}")
+def send_email_notification(patient_name, medication_time, pill_a_count, pill_b_count):
+    """
+    Send an email notification to the caregiver about a dispensed medication.
+
+    Args:
+        patient_name: Name of the patient who received medication
+        medication_time: Time period (Morning, Afternoon, Evening)
+        pill_a_count: Number of Pill A dispensed
+        pill_b_count: Number of Pill B dispensed
+    """
+    if not EMAIL_ENABLED:
+        print("Email notifications disabled.")
         return
 
     try:
+        # Create email message
         msg = MIMEMultipart()
-        msg['From'] = email_config["sender_email"]
-        msg['To'] = recipient
-        msg['Subject'] = subject
+        msg['From'] = EMAIL_SENDER
+        msg['To'] = EMAIL_RECIPIENT
+        msg['Subject'] = f"Medication Alert: {patient_name} - {medication_time} Dose"
 
-        msg.attach(MIMEText(message, 'plain'))
+        # Format timestamp
+        current_time = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
-        server = smtplib.SMTP(
-            email_config["smtp_server"], email_config["smtp_port"])
-        server.starttls()
-        server.login(email_config["sender_email"],
-                     email_config["sender_password"])
-        server.send_message(msg)
-        server.quit()
+        # Email body
+        email_body = f"""
+        <html>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6;">
+            <h2>Medication Dispenser Notification</h2>
+            <p>This is an automated notification from the Medication Dispenser System.</p>
+            
+            <div style="background-color: #f0f0f0; padding: 15px; border-radius: 5px; margin: 15px 0;">
+                <p><strong>Patient:</strong> {patient_name}</p>
+                <p><strong>Medication Time:</strong> {medication_time}</p>
+                <p><strong>Dispensed:</strong> {current_time}</p>
+                <p><strong>Medication Dispensed:</strong></p>
+                <ul>
+                    <li>Pill A: {pill_a_count}</li>
+                    <li>Pill B: {pill_b_count}</li>
+                </ul>
+            </div>
+            
+            <p>Please contact the patient to ensure medication was taken as prescribed.</p>
+            <p>This is an automated message. Please do not reply.</p>
+        </body>
+        </html>
+        """
 
-        print(f"Email sent to {recipient}: {subject}")
+        msg.attach(MIMEText(email_body, 'html'))
+
+        # Connect to SMTP server and send email
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()  # Encrypt the connection
+            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            server.send_message(msg)
+
+        print(
+            f"Email notification sent for {patient_name}'s {medication_time} medication")
+
     except Exception as e:
-        print(f"Failed to send email: {e}")
+        print(f"Failed to send email notification: {e}")
 
 
 def calculate_commands_for_choice(record, time_choice):
@@ -92,119 +127,6 @@ def calculate_commands_for_choice(record, time_choice):
     )
     return arduino_command, esp32_command
 
-
-def parse_time(time_str):
-    """Parse time string like '8:00 AM' into a datetime.time object."""
-    try:
-        return datetime.strptime(time_str, "%I:%M %p").time()
-    except ValueError:
-        try:
-            return datetime.strptime(time_str, "%H:%M").time()
-        except ValueError:
-            return None
-
-
-def check_upcoming_medications():
-    """Check if any medications are due in the next 5 minutes and send reminder emails."""
-    while True:
-        current_time = datetime.now().time()
-
-        for record in registered_users:
-            user_name = record['user_name']
-            patient_email = record.get('email')
-            if not patient_email:
-                continue
-
-            # Check each medication time
-            time_slots = [record['time1'], record['time2'], record['time3']]
-            time_names = ["Morning", "Afternoon", "Evening"]
-
-            for i, time_slot in enumerate(time_slots):
-                slot_time = parse_time(time_slot)
-                if not slot_time:
-                    continue
-
-                # Calculate reminder time (5 minutes before medication time)
-                slot_datetime = datetime.combine(datetime.today(), slot_time)
-                reminder_datetime = slot_datetime - timedelta(minutes=5)
-                reminder_time = reminder_datetime.time()
-
-                # Check if current time is within 30 seconds of the reminder time
-                current_datetime = datetime.combine(
-                    datetime.today(), current_time)
-                time_diff = abs(
-                    (current_datetime - reminder_datetime).total_seconds())
-
-                if time_diff <= 30 and not taken_status[user_name][i]:
-                    # Send reminder email
-                    subject = f"Medication Reminder: {time_names[i]} Dose"
-                    message = f"Hello {user_name},\n\nThis is a reminder that your {time_names[i]} medication is due in 5 minutes (at {time_slot}).\n\n"
-                    message += f"Your medication for this time is:\n- Pill A: {record[f'pill_a{i+1}']} pills\n- Pill B: {
-                        record[f'pill_b{i+1}']} pills\n\n"
-                    message += "Please take your medication on time.\n\nThank you,\nYour Medication Dispenser System"
-
-                    send_email(patient_email, subject, message)
-
-        # Check every 30 seconds
-        time.sleep(30)
-
-
-# Background thread to listen for incoming serial messages (from the Arduino)
-def serial_listener():
-    while True:
-        if arduino is not None and arduino.in_waiting:
-            try:
-                # Expect messages like "pills_taken:Dhruv:1"
-                line = arduino.readline().decode(errors='ignore').strip()
-                print("Received serial message:", line)  # Debug output
-
-                if line.startswith("pills_taken:"):
-                    parts = line.split(":")
-                    if len(parts) >= 3:
-                        username = parts[1]
-                        try:
-                            time_index = int(parts[2])
-                        except ValueError:
-                            continue
-
-                        # Ensure the user exists and update the status
-                        if username in taken_status and 0 <= time_index < 3:
-                            taken_status[username][time_index] = True
-                            flash(
-                                f"Notification: {username}'s pills for Time {time_index+1} have been taken.")
-
-                            # Check if this matches the last dispensed medication
-                            if (last_dispensed["user"] == username and
-                                    last_dispensed["time_index"] == time_index):
-                                print(
-                                    f"Status updated for last dispensed medication: {username}, Time {time_index+1}")
-
-                            # Send confirmation email to caregiver
-                            time_names = ["Morning", "Afternoon", "Evening"]
-                            subject = f"Medication Taken: {username} - {time_names[time_index]} Dose"
-                            message = f"{username} has taken their {time_names[time_index]} medication at {datetime.now().strftime('%I:%M %p')}.\n\n"
-                            # Find the record for this user to include medication details
-                            for record in registered_users:
-                                if record['user_name'] == username:
-                                    message += f"Medication details:\n- Pill A: {record[f'pill_a{time_index+1}']} pills\n- Pill B: {
-                                        record[f'pill_b{time_index+1}']} pills\n\n"
-                                    break
-
-                            send_email(
-                                email_config["caregiver_email"], subject, message)
-            except Exception as e:
-                print("Error reading from serial:", e)
-        time.sleep(0.1)
-
-
-# Start the background threads
-listener_thread = threading.Thread(target=serial_listener, daemon=True)
-listener_thread.start()
-
-# Start the medication reminder checker thread
-reminder_thread = threading.Thread(
-    target=check_upcoming_medications, daemon=True)
-reminder_thread.start()
 
 # HTML Template
 HTML_TEMPLATE = '''
@@ -327,11 +249,6 @@ HTML_TEMPLATE = '''
             color: #3498db;
             margin-bottom: 8px;
         }
-        .user-email {
-            color: #777;
-            font-style: italic;
-            font-size: 14px;
-        }
         .user-schedule {
             display: flex;
             justify-content: space-between;
@@ -378,13 +295,21 @@ HTML_TEMPLATE = '''
         }
         .reset-section {
             text-align: center;
-            margin-top: 30px;
+            margin-top: 20px;
         }
-        .reset-btn {
-            background: #e74c3c;
+        .patient-reset-btn {
+            background: #f39c12;
+            margin-top: 10px;
         }
-        .reset-btn:hover {
-            background: #c0392b;
+        .patient-reset-btn:hover {
+            background: #e67e22;
+        }
+        .disabled-btn {
+            background: #bdc3c7;
+            cursor: not-allowed;
+        }
+        .disabled-btn:hover {
+            background: #bdc3c7;
         }
         .flash-messages {
             background-color: #d4edda;
@@ -394,17 +319,14 @@ HTML_TEMPLATE = '''
             border-radius: 4px;
             border-left: 4px solid #28a745;
         }
-        .settings-section {
-            margin-top: 30px;
-            padding-top: 20px;
-            border-top: 1px solid #ddd;
-        }
-        .settings-title {
-            margin-bottom: 15px;
-            color: #555;
-        }
         .highlighted {
             animation: highlight 2s ease-in-out;
+        }
+        .email-config {
+            margin-top: 20px;
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 6px;
         }
         @keyframes highlight {
             0% { background-color: #fff; }
@@ -425,9 +347,9 @@ HTML_TEMPLATE = '''
 <body>
     <h1>Medication Dispenser System</h1>
     
-    {% if messages %}
+    {% if get_flashed_messages() %}
     <div class="flash-messages">
-        {% for message in messages %}
+        {% for message in get_flashed_messages() %}
             <div>{{ message }}</div>
         {% endfor %}
     </div>
@@ -440,11 +362,6 @@ HTML_TEMPLATE = '''
                 <div class="form-group">
                     <label for="name">Patient Name:</label>
                     <input type="text" id="name" name="name" required>
-                </div>
-                
-                <div class="form-group">
-                    <label for="email">Patient Email (for reminders):</label>
-                    <input type="email" id="email" name="email" required>
                 </div>
                 
                 <div class="pill-group">
@@ -500,22 +417,15 @@ HTML_TEMPLATE = '''
                 </div>
             </form>
             
-            <div class="settings-section">
-                <h3 class="settings-title">Email Notification Settings</h3>
-                <form action="/email_settings" method="post">
+            <div class="email-config">
+                <h3>Email Notification Settings</h3>
+                <form action="/update_email" method="post">
                     <div class="form-group">
                         <label for="caregiver_email">Caregiver Email:</label>
-                        <input type="email" id="caregiver_email" name="caregiver_email" 
-                               value="{{ email_config.caregiver_email }}" required>
+                        <input type="email" id="caregiver_email" name="caregiver_email" value="{{ caregiver_email }}" required>
                     </div>
                     <div class="form-group">
-                        <label>
-                            <input type="checkbox" name="email_enabled" {% if email_config.enabled %}checked{% endif %}>
-                            Enable Email Notifications
-                        </label>
-                    </div>
-                    <div class="form-group">
-                        <input type="submit" value="Save Settings">
+                        <input type="submit" value="Update Email Settings">
                     </div>
                 </form>
             </div>
@@ -530,7 +440,6 @@ HTML_TEMPLATE = '''
                     <div class="user-info">
                         <div>
                             <div class="user-title">{{ user.user_name }}</div>
-                            <div class="user-email">{{ user.email }}</div>
                         </div>
                     </div>
                     
@@ -569,33 +478,36 @@ HTML_TEMPLATE = '''
                     <div class="dispense-buttons">
                         <div class="dispense-btn">
                             <form action="/send/{{ i }}/0" method="post" onsubmit="return confirm('Dispense morning medication for {{ user.user_name }}?')">
-                                <input type="submit" value="Dispense Morning Dose">
+                                <input type="submit" value="Dispense Morning Dose" 
+                                    {% if taken_status[user.user_name][0] %}disabled class="disabled-btn"{% endif %}>
                             </form>
                         </div>
                         
                         <div class="dispense-btn">
                             <form action="/send/{{ i }}/1" method="post" onsubmit="return confirm('Dispense afternoon medication for {{ user.user_name }}?')">
-                                <input type="submit" value="Dispense Afternoon Dose">
+                                <input type="submit" value="Dispense Afternoon Dose"
+                                    {% if taken_status[user.user_name][1] %}disabled class="disabled-btn"{% endif %}>
                             </form>
                         </div>
                         
                         <div class="dispense-btn">
                             <form action="/send/{{ i }}/2" method="post" onsubmit="return confirm('Dispense evening medication for {{ user.user_name }}?')">
-                                <input type="submit" value="Dispense Evening Dose">
+                                <input type="submit" value="Dispense Evening Dose"
+                                    {% if taken_status[user.user_name][2] %}disabled class="disabled-btn"{% endif %}>
                             </form>
                         </div>
+                    </div>
+                    
+                    <div class="reset-section">
+                        <form action="/reset_patient/{{ i }}" method="post" onsubmit="return confirm('Reset medication status for {{ user.user_name }}?')">
+                            <input type="submit" value="Reset Patient Status" class="patient-reset-btn">
+                        </form>
                     </div>
                 </div>
                 {% endfor %}
             {% else %}
                 <p>No patients registered yet.</p>
             {% endif %}
-            
-            <div class="reset-section">
-                <form action="/reset" method="post" onsubmit="return confirm('Reset all medication status indicators?')">
-                    <input type="submit" value="Reset All Status Indicators" class="reset-btn">
-                </form>
-            </div>
         </div>
     </div>
 </body>
@@ -607,14 +519,12 @@ HTML_TEMPLATE = '''
 
 @app.route('/', methods=['GET'])
 def home():
-    messages = get_flashed_messages()
     return render_template_string(
         HTML_TEMPLATE,
-        messages=messages,
         registered_users=enumerate(registered_users),
         taken_status=taken_status,
         last_dispensed=last_dispensed,
-        email_config=email_config
+        caregiver_email=EMAIL_RECIPIENT
     )
 
 # Registration route: add a new user.
@@ -623,7 +533,6 @@ def home():
 @app.route('/register', methods=['POST'])
 def register():
     user_name = request.form.get('name')
-    email = request.form.get('email')
     time1 = request.form.get('time1')
     time2 = request.form.get('time2')
     time3 = request.form.get('time3')
@@ -635,7 +544,6 @@ def register():
     pill_b3 = request.form.get('pill_b3')
     record = {
         'user_name': user_name,
-        'email': email,
         'time1': time1,
         'time2': time2,
         'time3': time3,
@@ -652,6 +560,18 @@ def register():
     flash(f"Patient {user_name} registered successfully.")
     return redirect(url_for('home'))
 
+# Route to update caregiver email
+
+
+@app.route('/update_email', methods=['POST'])
+def update_email():
+    global EMAIL_RECIPIENT
+    email = request.form.get('caregiver_email')
+    if email:
+        EMAIL_RECIPIENT = email
+        flash(f"Caregiver email updated to {email}")
+    return redirect(url_for('home'))
+
 # Send route: send dosage for a given user and chosen time.
 
 
@@ -659,13 +579,23 @@ def register():
 def send(index, time_choice):
     if 0 <= index < len(registered_users) and 0 <= time_choice < 3:
         record = registered_users[index]
+        user_name = record['user_name']
+
+        # Check if this dose has already been taken
+        if taken_status[user_name][time_choice]:
+            flash(f"This dose has already been dispensed for {user_name}.")
+            return redirect(url_for('home'))
+
         arduino_command, esp32_command = calculate_commands_for_choice(
             record, time_choice)
 
         # Update the last dispensed info to track which button was pressed
-        last_dispensed["user"] = record['user_name']
+        last_dispensed["user"] = user_name
         last_dispensed["time_index"] = time_choice
         last_dispensed["timestamp"] = datetime.now()
+
+        # Mark the dose as taken immediately (no need to wait for serial confirmation)
+        taken_status[user_name][time_choice] = True
 
         if arduino:
             arduino.write((arduino_command + "\n").encode())
@@ -678,60 +608,36 @@ def send(index, time_choice):
         else:
             print("ESP32 serial not available.")
 
-        # Note: Status update now happens only when "pills_taken" message is received
+        # Get the time period name and pill counts
+        time_periods = ["Morning", "Afternoon", "Evening"]
+        time_period = time_periods[time_choice]
+        pill_a_count = record[f'pill_a{time_choice+1}']
+        pill_b_count = record[f'pill_b{time_choice+1}']
+
+        # Send email notification
+        send_email_notification(user_name, time_period,
+                                pill_a_count, pill_b_count)
+
         flash(
-            f"Dispensing medication for {record['user_name']} at Time {time_choice+1}.")
-
-        # If it's been 15 minutes since dispensing and status hasn't changed, notify caregiver
-        def check_medication_taken():
-            time.sleep(15 * 60)  # Wait 15 minutes
-            if (last_dispensed["user"] == record['user_name'] and
-                last_dispensed["time_index"] == time_choice and
-                    not taken_status[record['user_name']][time_choice]):
-                # Medication wasn't taken after 15 minutes
-                time_names = ["Morning", "Afternoon", "Evening"]
-                subject = f"ALERT: Missed Medication - {record['user_name']} - {time_names[time_choice]} Dose"
-                message = f"ATTENTION: {record['user_name']} has not taken their {time_names[time_choice]} medication.\n\n"
-                message += f"The medication was dispensed at {last_dispensed['timestamp'].strftime('%I:%M %p')}, but has not been taken.\n\n"
-                message += f"Medication details:\n- Pill A: {record[f'pill_a{time_choice+1}']} pills\n- Pill B: {
-                    record[f'pill_b{time_choice+1}']} pills\n\n"
-                message += "Please check on the patient."
-
-                send_email(email_config["caregiver_email"], subject, message)
-                print(f"Sent medication reminder for {record['user_name']}")
-
-        # Start a thread to check if medication was taken
-        reminder_thread = threading.Thread(target=check_medication_taken)
-        reminder_thread.daemon = True
-        reminder_thread.start()
-
+            f"Dispensing medication for {user_name} at Time {time_choice+1}. Email notification sent.")
         return redirect(url_for('home'))
     else:
         flash("Invalid patient or time selection.")
         return redirect(url_for('home'))
 
-# Email settings route
+# Reset single patient route
 
 
-@app.route('/email_settings', methods=['POST'])
-def email_settings():
-    email_config["caregiver_email"] = request.form.get('caregiver_email')
-    email_config["enabled"] = 'email_enabled' in request.form
-
-    flash("Email notification settings updated successfully.")
-    return redirect(url_for('home'))
-
-# Reset route: resets all notifications.
-
-
-@app.route('/reset', methods=['POST'])
-def reset():
-    for user in registered_users:
-        taken_status[user['user_name']] = [False, False, False]
-    flash("All medication status indicators have been reset.")
+@app.route('/reset_patient/<int:index>', methods=['POST'])
+def reset_patient(index):
+    if 0 <= index < len(registered_users):
+        user = registered_users[index]
+        user_name = user['user_name']
+        taken_status[user_name] = [False, False, False]
+        flash(f"Medication status for {user_name} has been reset.")
     return redirect(url_for('home'))
 
 
 if __name__ == '__main__':
-    # Avoid the reloader to prevent duplicate background threads.
+    # Start with simplified functionality - no need for serial listener thread
     app.run(debug=True, host='0.0.0.0', port=5001, use_reloader=False)
